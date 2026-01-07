@@ -3,60 +3,75 @@ import pandas as pd
 import requests
 import os
 import time
+from datetime import datetime
+import pytz
 
 TG_TOKEN = os.getenv("TG_TOKEN")
 TG_CHAT_ID = os.getenv("TG_CHAT_ID")
 
-def get_low_price_hot_stocks():
-    """自動尋找成交量大且價格低於 50 元的標的"""
-    url = "https://tw.stock.yahoo.com/ranking/volume?exchange=TAI" # 抓成交量排行
+# 核心追蹤（就算排行榜沒出現也要跑）
+CORE_LIST = ["2330.TW", "NVDA", "TSLA"]
+
+def get_trending_stocks():
+    """自動從 Yahoo 財經抓取台股成交值排行榜前 10 名"""
+    url = "https://tw.stock.yahoo.com/ranking/value?exchange=TAI"
     headers = {'User-Agent': 'Mozilla/5.0'}
-    targets = []
+    trending = []
     try:
         response = requests.get(url, headers=headers)
-        df = pd.read_html(response.text)[0]
-        
-        # 1. 抓取代號
-        # 2. 同時抓取成交價，過濾掉 > 50 元的
-        for index, row in df.iterrows():
-            try:
-                code = str(row['代號']).split('.')[0]
-                price = float(row['成交'])
-                volume = str(row['成交量(張)']).replace(',', '')
-                
-                # 只找價格 < 50 且 成交量 > 15000 張的
-                if price < 50 and int(volume) > 15000:
-                    targets.append(f"{code}.TW")
-            except:
-                continue
+        dfs = pd.read_html(response.text)
+        df = dfs[0]
+        # 抓取代號列，並轉換為 .TW 格式
+        codes = df['代號'].astype(str).str.extract(r'(\d+)')[0].dropna().tolist()
+        for code in codes[:10]:
+            trending.append(f"{code}.TW")
     except Exception as e:
-        print(f"抓取失敗: {e}")
-        targets = ["6116.TW", "2409.TW", "2609.TW", "2883.TW"]
-    return list(set(targets))[:12] # 取前 12 隻
+        print(f"動態抓取失敗: {e}")
+        trending = ["2317.TW", "1513.TW", "2359.TW", "3231.TW", "2603.TW"]
+    return list(set(CORE_LIST + trending))
+
+def calculate_indicators(df):
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    close = df['Close']
+    ema12, ema26 = close.ewm(span=12).mean(), close.ewm(span=26).mean()
+    df['MACD'] = ema12 - ema26
+    df['Signal'] = df['MACD'].ewm(span=9).mean()
+    low_min, high_max = df['Low'].rolling(9).min(), df['High'].rolling(9).max()
+    rsv = (close - low_min) / (high_max - low_min) * 100
+    df['K'] = rsv.ewm(com=2).mean()
+    df['D'] = df['K'].ewm(com=2).mean()
+    df['MA20'] = close.rolling(20).mean()
+    return df
 
 def get_report(ticker):
     try:
         t = yf.Ticker(ticker)
         df = t.history(period="1y", interval="1d")
-        if df.empty: return None
-        
+        if df.empty or len(df) < 30: return None
+        df = calculate_indicators(df)
         latest = df.iloc[-1]
-        vol = latest['Volume'] / 1000 # 換算成「張」
-        price = latest['Close']
+        price, k, macd, sig, ma20 = latest['Close'], latest['K'], latest['MACD'], latest['Signal'], latest['MA20']
         
-        # 簡單判斷：收紅且成交量比前五天平均高
-        avg_vol = df['Volume'].iloc[-6:-1].mean() / 1000
-        status = "🔥 爆量衝刺" if vol > avg_vol * 1.5 else "⚪ 穩定放量"
+        # 爆量判斷
+        vol_avg = df['Volume'].iloc[-6:-1].mean()
+        is_vol_spike = "🔥爆量" if latest['Volume'] > vol_avg * 1.5 else ""
         
-        return f"🏢 *{ticker}*\n💰 價: `{price:.2f}` | 量: `{vol:.0f}張`\n📢 狀態: {status}"
-    except:
-        return None
+        # 建議邏輯
+        status = "⚪ 觀望"
+        if macd > sig and k > latest['D']:
+            status = "🚀 強勢" if price > ma20 else "⚡ 短多"
+        elif price > ma20:
+            status = "📈 持有"
+            
+        return f"🏢 *{ticker}* {is_vol_spike}\n💰 價: `{price:.2f}` | {status} | K:{k:.1f}"
+    except: return None
 
 if __name__ == "__main__":
-    stocks = get_low_price_hot_stocks()
+    stocks = get_trending_stocks()
     reports = [get_report(s) for s in stocks if get_report(s)]
-    
     if reports:
-        msg = "🎯 *小資低價爆量標的掃描*\n基準：股價 < 50 & 量 > 1.5萬張\n" + "-"*15 + "\n" + "\n\n".join(reports)
+        tw_now = datetime.now(pytz.timezone('Asia/Taipei')).strftime('%m/%d %H:%M')
+        msg = f"🔥 *今日大流量獵殺報告* ({tw_now})\n" + "\n\n".join(reports)
         requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", 
                       data={"chat_id": TG_CHAT_ID, "text": msg, "parse_mode": "Markdown"})
