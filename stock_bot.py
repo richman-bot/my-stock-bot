@@ -1,4 +1,3 @@
-
 import yfinance as yf
 import pandas as pd
 import requests
@@ -17,6 +16,19 @@ STOCK_LIST = [
     "2454.TW", "2382.TW", "2317.TW", "3231.TW", 
     "3017.TW", "2409.TW", "3481.TW"
 ]
+
+# --- 僅保留台股中文對照表 ---
+CHINESE_NAME_MAP = {
+    "6116.TW": "彩晶",
+    "2330.TW": "台積電",
+    "2454.TW": "聯發科",
+    "2382.TW": "廣達",
+    "2317.TW": "鴻海",
+    "3231.TW": "緯創",
+    "3017.TW": "奇鋐",
+    "2409.TW": "友達",
+    "3481.TW": "群創"
+}
 
 def calculate_indicators(df):
     """計算 MACD, KD, 均線指標 (原本邏輯不動)"""
@@ -59,12 +71,12 @@ def run_backtest(df, fee=0.001425):
     return total_profit, win_rate
 
 def get_analysis_report(ticker):
-    """生成單一股票報告 (新增名稱與長短線判斷)"""
+    """生成單一股票報告 (台股中文名稱、美股代號)"""
     try:
         t = yf.Ticker(ticker)
-        # 獲取名稱並簡化
-        raw_name = t.info.get('longName', t.info.get('shortName', ticker))
-        name = raw_name.split("Inc.")[0].split("Co., Ltd.")[0].strip()
+        
+        # --- 修改點：台股用中文，美股維持代號 ---
+        name = CHINESE_NAME_MAP.get(ticker, ticker)
         
         df = t.history(period="1y", interval="1d")
         if df.empty or len(df) < 30: return None
@@ -81,7 +93,8 @@ def get_analysis_report(ticker):
         
         # --- 判斷邏輯 ---
         is_short_buy = (macd_val > sig_val) and (k_val > float(latest['D']))
-        is_long_trend = (price > ma20) and (ma20 > df['MA20'].iloc[-5]) # 價格在月線上且月線向上
+        # 長線趨勢：股價在月線上，且月線（MA20）趨勢向上
+        is_long_trend = (price > ma20) and (ma20 > df['MA20'].iloc[-5]) 
 
         if is_short_buy and is_long_trend:
             status = "🚀 *強勢噴發 (建議買入)*"
